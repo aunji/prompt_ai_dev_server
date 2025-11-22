@@ -1,3 +1,12 @@
+act you is senior dev top of world
+
+droplet is 159.65.132.177
+
+use aunji ssh key
+
+you must build app to deploy on automate not ask me
+
+
 📄 SOP_KPI_ATTENDANCE_SYSTEM_SPEC.md
 
 Project Goal:
