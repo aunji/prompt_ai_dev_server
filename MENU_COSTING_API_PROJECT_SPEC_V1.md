@@ -6,6 +6,7 @@ use aunji ssh key
 
 you must build app to deploy on automate not ask me
 
+and save coding log always in .md and when you come back to coding again please read log coding before think anything
 
 0. PROJECT OVERVIEW
 
