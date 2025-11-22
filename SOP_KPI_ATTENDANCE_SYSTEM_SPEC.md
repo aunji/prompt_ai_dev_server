@@ -5,7 +5,7 @@ droplet is 159.65.132.177
 use aunji ssh key
 
 you must build app to deploy on automate not ask me
-
+and save coding log always in .md and when you come back to coding again please read log coding before think anything
 
 📄 SOP_KPI_ATTENDANCE_SYSTEM_SPEC.md
 
