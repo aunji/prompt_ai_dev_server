@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                              RebateEngineV2.mq4 |
 //|                                      Copyright 2025, Aunji Team |
-//|                            V2 - Advanced Multi-Engine System    |
+//|                       V2.1 - Patched Multi-Engine System        |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Aunji Team"
 #property link      ""
-#property version   "2.00"
+#property version   "2.10"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -172,7 +172,7 @@ struct BasketStateV2
 int OnInit()
 {
    Print("========================================");
-   Print("  RebateEngineV2 - Advanced System");
+   Print("  RebateEngineV2.1 - Patched System");
    Print("========================================");
    Print("Symbol: ", TradeSymbol);
    Print("Magic Number: ", MagicNumber);
@@ -350,6 +350,25 @@ void ResetDailyLotCounter()
 //| BASKET STATE V2 FUNCTIONS                                        |
 //+------------------------------------------------------------------+
 
+// PATCH 3.2: Get basket start time from orders
+datetime GetBasketStartTime()
+{
+   datetime earliestTime = 0;
+
+   for(int i = 0; i < OrdersTotal(); i++)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS)) continue;
+      if(OrderMagicNumber() != MagicNumber) continue;
+      if(OrderSymbol() != TradeSymbol) continue;
+
+      datetime openTime = OrderOpenTime();
+      if(earliestTime == 0 || openTime < earliestTime)
+         earliestTime = openTime;
+   }
+
+   return earliestTime;
+}
+
 BasketStateV2 GetBasketStateV2()
 {
    BasketStateV2 state;
@@ -370,7 +389,9 @@ BasketStateV2 GetBasketStateV2()
    state.trendScore = CalcTrendScore();
    state.atrValue = iATR(TradeSymbol, ATRTF, ATRPeriod, 0);
    state.gridStepDynamic = CalcATRGrid(state.atrValue);
-   state.basketAge = (BasketStartTime > 0) ? (int)(TimeCurrent() - BasketStartTime) : 0;
+   // PATCH 3.2: Use GetBasketStartTime() instead of global variable
+   datetime basketStart = GetBasketStartTime();
+   state.basketAge = (basketStart > 0) ? (int)(TimeCurrent() - basketStart) : 0;
    state.hedgeActive = false;
    state.dxyTrend = GetDXYTrend();
 
@@ -415,8 +436,6 @@ BasketStateV2 GetBasketStateV2()
          state.avgPriceDir = buyWeightedPrice / state.buyLots;
       if(state.sellLots > 0)
          state.avgPriceHedge = sellWeightedPrice / state.sellLots;
-      if(state.sellLots > 0.01)
-         state.hedgeActive = true;
    }
    else if(state.exposure < -ExposureNeutralThreshold)
    {
@@ -427,13 +446,15 @@ BasketStateV2 GetBasketStateV2()
          state.avgPriceDir = sellWeightedPrice / state.sellLots;
       if(state.buyLots > 0)
          state.avgPriceHedge = buyWeightedPrice / state.buyLots;
-      if(state.buyLots > 0.01)
-         state.hedgeActive = true;
    }
    else
    {
       state.direction = 0;  // Neutral
    }
+
+   // PATCH 3.4: Ratio-based hedge detection
+   if(state.totalLotsDir > 0)
+      state.hedgeActive = (state.totalLotsHedge > state.totalLotsDir * 0.05);
 
    // Calculate DD
    if(BasketStartEquity > 0)
@@ -861,6 +882,18 @@ void ManageMicroFillsV2()
    if(atrPercent > HighRiskATRThreshold)
       microDistance *= 1.5;  // Increase spacing in high volatility
 
+   // PATCH 5.2: Spread adjustment - widen spacing when spread is high
+   if(UseSpreadAdaptive && spread > SpreadNormal)
+      microDistance *= (1.0 + MicroSpreadReduceFactor);
+
+   // PATCH 5.1: Distance validation from last entry
+   if(BasketInitialPrice > 0)
+   {
+      double distanceFromLastEntry = MathAbs(currentPrice - BasketInitialPrice);
+      if(distanceFromLastEntry < microDistance)
+         return;  // Too close to last entry
+   }
+
    // Check cooldown
    int barsPassed = (int)((TimeCurrent() - LastMicroEntryTime) / PeriodSeconds(Period()));
    if(barsPassed < MicroCooldownBars) return;
@@ -1005,13 +1038,16 @@ bool ShouldOpenGridSellV2(BasketStateV2 &state)
    if(BasketInitialPrice == 0) return false;
    if(LastGridLevel >= MaxGridDepth) return false;
 
-   // Calculate distance using ATR-based grid step
-   double distance = Ask - BasketInitialPrice;
+   // PATCH 4.1: Use midpoint for distance calculation
+   double currentPrice = (Ask + Bid) / 2;
+   double distance = MathAbs(currentPrice - BasketInitialPrice);
    double requiredDistance = state.gridStepDynamic * (LastGridLevel + 1);
 
-   // Adjust grid distance in different risk tiers
+   // PATCH 4.2: Adjust grid distance in different risk tiers
    if(CurrentRiskTier == RISK_HIGH)
       requiredDistance *= 2.0;  // Double distance in high risk
+   else if(CurrentRiskTier == RISK_LOW)
+      requiredDistance *= 0.8;  // Reduce distance in low risk
 
    return (distance >= requiredDistance);
 }
@@ -1022,13 +1058,16 @@ bool ShouldOpenGridBuyV2(BasketStateV2 &state)
    if(BasketInitialPrice == 0) return false;
    if(LastGridLevel >= MaxGridDepth) return false;
 
-   // Calculate distance
-   double distance = BasketInitialPrice - Bid;
+   // PATCH 4.1: Use midpoint for distance calculation
+   double currentPrice = (Ask + Bid) / 2;
+   double distance = MathAbs(currentPrice - BasketInitialPrice);
    double requiredDistance = state.gridStepDynamic * (LastGridLevel + 1);
 
-   // Adjust in risk tiers
+   // PATCH 4.2: Adjust in risk tiers
    if(CurrentRiskTier == RISK_HIGH)
       requiredDistance *= 2.0;
+   else if(CurrentRiskTier == RISK_LOW)
+      requiredDistance *= 0.8;
 
    return (distance >= requiredDistance);
 }
@@ -1120,10 +1159,8 @@ bool ShouldOpenHedgeV2(BasketStateV2 &state)
    // Trigger 2: Margin threshold
    bool marginTrigger = (marginLevel < HedgeMarginTriggerLevel);
 
-   // Trigger 3: Trend score threshold (weak trend)
-   bool trendTrigger = (state.trendScore < 35 || state.trendScore > 65);
-
-   return (ddTrigger || marginTrigger || !trendTrigger);
+   // PATCH 6.1: Remove trend-based trigger - only DD or margin should activate hedge
+   return (ddTrigger || marginTrigger);
 }
 
 double CalcHedgeLotV2(BasketStateV2 &state)
@@ -1184,8 +1221,8 @@ void TryCloseHedgesV2(BasketStateV2 &state)
 {
    if(state.totalLotsHedge <= 0) return;
 
-   // V1.1 fix: Enhanced close conditions
-   bool cond1 = (state.floatingProfit >= AccountEquity() * HedgeCloseMinProfit);  // 0.3% equity minimum
+   // PATCH 6.2: Lot-based profit threshold instead of equity percentage
+   bool cond1 = (state.floatingProfit >= MathAbs(state.totalLotsHedge * 0.5));
    bool cond2 = TrendFlipDetectedV2(state.direction);  // Requires 2-bar confirmation
    bool cond3 = MathAbs(state.exposure) < ExposureNeutralThreshold * 0.5;  // Exposure rebalanced
 
@@ -1548,7 +1585,7 @@ void UpdateDashboardV2()
 
    string info = "\n";
    info += "========================================\n";
-   info += "   REBATE ENGINE V2\n";
+   info += "   REBATE ENGINE V2.1\n";
    info += "========================================\n";
    info += "Account Equity: $" + DoubleToStr(AccountEquity(), 2) + "\n";
    info += "Account DD: " + DoubleToStr(GetAccountDDPercent(), 2) + "%\n";
@@ -1578,8 +1615,25 @@ void UpdateDashboardV2()
    if(state.hedgeActive) info += " [ACTIVE]";
    info += "\n";
 
+   // PATCH 8: Hedge ratio percentage
+   if(state.totalLotsDir > 0)
+   {
+      double hedgeRatio = (state.totalLotsHedge / state.totalLotsDir) * 100.0;
+      info += "Hedge Ratio: " + DoubleToStr(hedgeRatio, 1) + "%\n";
+   }
+
    info += "Floating P/L: $" + DoubleToStr(state.floatingProfit, 2) + "\n";
    info += "Basket DD: " + DoubleToStr(state.ddPercent, 2) + "%\n";
+
+   // PATCH 8: Start equity snapshot
+   if(BasketStartEquity > 0)
+   {
+      info += "Start Equity: $" + DoubleToStr(BasketStartEquity, 2);
+      // PATCH 8: Equity-frozen status
+      if(BasketEquityFrozen) info += " [FROZEN]";
+      info += "\n";
+   }
+
    info += "----------------------------------------\n";
 
    info += "Trend Score: " + IntegerToString(state.trendScore) + "/100";
@@ -1592,11 +1646,22 @@ void UpdateDashboardV2()
    info += "Grid Step: " + DoubleToStr(state.gridStepDynamic / Point, 0) + " pts\n";
    info += "Grid Level: " + IntegerToString(state.gridDepth) + "/" + IntegerToString(MaxGridDepth) + "\n";
 
+   // PATCH 8: Basket age with staging
    if(state.basketAge > 0)
    {
       int ageHours = state.basketAge / 3600;
       int ageMinutes = (state.basketAge % 3600) / 60;
-      info += "Basket Age: " + IntegerToString(ageHours) + "h " + IntegerToString(ageMinutes) + "m\n";
+      info += "Basket Age: " + IntegerToString(ageHours) + "h " + IntegerToString(ageMinutes) + "m";
+
+      // Show aging stage
+      if(ageHours >= BasketAgeForceClose_Hours)
+         info += " [Stage 3: FORCE CLOSE]";
+      else if(ageHours >= BasketAgeStopGrid_Hours)
+         info += " [Stage 2: STOP GRID]";
+      else if(ageHours >= BasketAgeReduceTP_Hours)
+         info += " [Stage 1: REDUCE TP]";
+
+      info += "\n";
    }
 
    info += "----------------------------------------\n";
